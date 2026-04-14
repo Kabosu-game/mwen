@@ -64,6 +64,14 @@ jobs:
             ([ -f ${{ secrets.DEPLOY_PATH }}/.env ] && chmod 644 ${{ secrets.DEPLOY_PATH }}/.env || true)
           "
 
+      - name: Write .env on VPS (first deploy only)
+        env:
+          ENV_CONTENT: ${{ secrets.ENV_FILE }}
+        run: |
+          echo "$ENV_CONTENT" | ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            "${{ secrets.SERVER_USER }}"@"${{ secrets.SERVER_IP }}" \
+            "[ -f ${{ secrets.DEPLOY_PATH }}/.env ] || cat > ${{ secrets.DEPLOY_PATH }}/.env"
+
       - name: Run commands on VPS
         run: |
           ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
