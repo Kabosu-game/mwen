@@ -1,0 +1,97 @@
+name: Deploy mwen
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: intl, mbstring, xml, zip, curl, gd, bcmath, pdo_mysql
+
+      - name: Update Composer dependencies
+        run: composer update --no-dev --optimize-autoloader --no-interaction
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          head -n 1 ~/.ssh/id_ed25519
+          tail -n 1 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Test SSH Connection
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            "${{ secrets.SERVER_USER }}"@"${{ secrets.SERVER_IP }}" \
+            "echo 'SSH Connection OK'"
+
+      - name: Deploy project to VPS
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='storage' \
+            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" \
+            ./ "${{ secrets.SERVER_USER }}"@"${{ secrets.SERVER_IP }}":"${{ secrets.DEPLOY_PATH }}"
+
+      - name: Fix permissions on VPS
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            "${{ secrets.SERVER_USER }}"@"${{ secrets.SERVER_IP }}" "
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/app/public &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/framework/cache &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/framework/sessions &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/framework/testing &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/framework/views &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/storage/logs &&
+            mkdir -p ${{ secrets.DEPLOY_PATH }}/bootstrap/cache &&
+            chown -R apache:apache ${{ secrets.DEPLOY_PATH }} &&
+            chmod -R 755 ${{ secrets.DEPLOY_PATH }} &&
+            chmod -R 775 ${{ secrets.DEPLOY_PATH }}/storage &&
+            chmod -R 775 ${{ secrets.DEPLOY_PATH }}/bootstrap/cache &&
+            ([ -f ${{ secrets.DEPLOY_PATH }}/.env ] && chmod 644 ${{ secrets.DEPLOY_PATH }}/.env || true)
+          "
+
+      - name: Run commands on VPS
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            "${{ secrets.SERVER_USER }}"@"${{ secrets.SERVER_IP }}" << 'EOF'
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            echo "📦 Installation des dépendances PHP"
+            composer install --no-dev --optimize-autoloader --no-interaction
+
+            echo "📦 Installation des dépendances Node"
+            npm install
+            npm run build
+
+            if [ -f .env ]; then
+              echo "⚙️ Optimisation Laravel"
+              php artisan key:generate --force || true
+              php artisan migrate --force || true
+              php artisan config:clear
+              php artisan optimize
+              php artisan storage:link || true
+              php artisan queue:restart || true
+            else
+              echo "⚠️ .env absent, artisan ignoré"
+            fi
+
+            sudo systemctl reload php-fpm || true
+            sudo systemctl reload nginx || true
+
+            echo "✅ Déploiement mwen terminé"
+          EOF
